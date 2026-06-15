@@ -217,13 +217,15 @@ async def fields(interaction: discord.Interaction):
     lines = [
         "🌾 **Owned fields:**",
         "```",
-        f"{'ID':<4} {'Area':>8} {'Value':>10}",
-        f"{'----':<4} {'--------':>8} {'----------':>10}",
+        f"{'ID':<4} {'Area':>8} {'Value':>12}",
+        f"{'----':<4} {'--------':>8} {'----------':>12}",
     ]
 
     for field_id in sort_field_ids(snapshot.owned_fields.keys()):
         field = snapshot.owned_fields[field_id]
-        lines.append(f"{field_id:<4} {field.area:8.2f} {field.value:10.0f}")
+        lines.append(
+            f"{field_id:<4} {field.area:8.2f} {f'£{field.value:,.0f}':>12}"
+        )
 
     lines.append("```")
     await interaction.response.send_message("\n".join(lines))
@@ -245,11 +247,19 @@ async def stock(interaction: discord.Interaction):
         await interaction.response.send_message("No stock levels found.")
         return
 
-    lines = ["📦 **Stock levels:**"]
+    lines = [
+        "📦 **Stock Levels:**",
+        "```",
+        f"{'Item':<20} {'Amount':>12} {'Pallets':>10}",
+        f"{'-' * 20:<20} {'-' * 12:>12} {'-' * 10:>10}",
+    ]
+
     lines.extend(
-        f"• {item}: {amount:.0f}"
+        f"{item:<20} {amount:12,.0f} {amount / 1000:10,.0f}"
         for item, amount in sorted(stock_items.items())
     )
+
+    lines.append("```")
 
     await send_chunked_response(interaction, lines)
 
@@ -317,6 +327,7 @@ async def reboot(interaction: discord.Interaction):
 
 
 @client.tree.command(name="my_perms", description="Show your Discord permissions")
+@app_commands.default_permissions(administrator=True)
 async def my_perms(interaction: discord.Interaction):
     if interaction.guild_id is None:
         await interaction.response.send_message(
