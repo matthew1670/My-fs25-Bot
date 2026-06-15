@@ -274,11 +274,12 @@ async def production(interaction: discord.Interaction):
         await interaction.response.send_message("No production pallets found.")
         return
 
-    lines = ["🏭 **Production pallets:**"]
+    lines = ["🏭 **Production pallets:**", "```"]
     lines.extend(
-        f"• {item}: {count}"
+        f"{item:<20} {count:>10} pallets"
         for item, count in sorted(snapshot.production_counts.items())
     )
+    lines.append("```")
 
     await send_chunked_response(interaction, lines)
 
@@ -293,11 +294,13 @@ async def vehicles(interaction: discord.Interaction):
         await interaction.response.send_message("No vehicles or equipment found.")
         return
 
-    lines = ["🚜 **Vehicles and equipment:**"]
+    lines = ["🚜 **Vehicles and equipment:**", "```"]
     lines.extend(
-        f"• {vehicle['name']} — {vehicle['category']}"
+        f"• {vehicle['name']:<30} {vehicle['category']:<15} {vehicle['type']:<15} "
         for vehicle in snapshot.vehicles
+        if vehicle["category"] not in ["PALLETS", "BIGBAGPALLETS", "BIGBAG"]  
     )
+    lines.append("```")
 
     await send_chunked_response(interaction, lines)
 

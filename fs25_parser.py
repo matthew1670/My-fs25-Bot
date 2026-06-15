@@ -88,7 +88,7 @@ def get_mods(root: ET.Element) -> List[str]:
 
 def get_stock_levels(root: ET.Element) -> Dict[str, float]:
     stock = defaultdict(float)
-
+    ignore_types = {"UNKNOWN", "WATER", "AIR", "GRASS_WINDROW"}
     for vehicle in root.findall(".//Vehicles/Vehicle"):
         fill_types = vehicle.get("fillTypes")
         fill_levels = vehicle.get("fillLevels")
@@ -100,7 +100,8 @@ def get_stock_levels(root: ET.Element) -> Dict[str, float]:
         levels = fill_levels.split()
 
         for fill_type, level in zip(types, levels):
-            stock[fill_type] += _float(level)
+            if fill_type not in ignore_types:
+                stock[fill_type] += _float(level)
 
     return dict(stock)
 
