@@ -299,7 +299,7 @@ async def list_mods(interaction: discord.Interaction):
         return
 
     if not snapshot.mods:
-        await interaction.response.send_message("No active mods found.")
+        await interaction.response.send_message("No active mods found.", ephemeral=True)
         return
 
     lines = ["🧩 **Active Mods:**"]
@@ -348,11 +348,11 @@ async def my_perms(interaction: discord.Interaction):
 @client.tree.command(name="last_error", description="Show the last error from polling FS25 XML")
 async def last_error_command(interaction: discord.Interaction):
     if last_error_message is None:
-        await interaction.response.send_message("✅ No errors yet. All good!")
+        await interaction.response.send_message("✅ No errors yet. All good!" , ephemeral=True)
         return
 
     await interaction.response.send_message(
-        f"❌ **Last error:**\n```\n{last_error_message}\n```"
+        f"❌ **Last error:**\n```\n{last_error_message}\n```", ephemeral=True
     )
 
 
