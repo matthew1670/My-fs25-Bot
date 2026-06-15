@@ -1,4 +1,5 @@
 import asyncio
+import logging
 import os
 import sys
 from typing import Optional
@@ -10,6 +11,12 @@ from dotenv import load_dotenv
 
 from alerts import AlertManager
 from fs25_parser import ServerSnapshot, fetch_snapshot
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+)
+logger = logging.getLogger(__name__)
 
 load_dotenv()
 
@@ -28,7 +35,14 @@ alerts = AlertManager(DISCORD_WEBHOOK)
 class FS25Bot(discord.Client):
     def __init__(self):
         intents = discord.Intents.default()
-        super().__init__(intents=intents)
+        intents.guilds = True
+        intents.members = True
+
+        super().__init__(
+            intents=intents,
+            member_cache_flags=discord.MemberCacheFlags.all(),
+        )
+
         self.tree = app_commands.CommandTree(self)
 
     async def setup_hook(self):
@@ -49,23 +63,24 @@ def require_snapshot() -> ServerSnapshot:
     return latest_snapshot
 
 
-async def get_interaction_member(interaction: discord.Interaction) -> Optional[discord.Member]:
-    if interaction.guild is None:
-        return None
-    if isinstance(interaction.user, discord.Member):
-        return interaction.user
-
-    member = interaction.guild.get_member(interaction.user.id)
-    if member is not None:
-        return member
-
+async def get_snapshot_or_reply(
+    interaction: discord.Interaction,
+) -> Optional[ServerSnapshot]:
     try:
-        return await interaction.guild.fetch_member(interaction.user.id)
-    except (discord.NotFound, discord.HTTPException):
+        return require_snapshot()
+    except RuntimeError as error:
+        await interaction.response.send_message(str(error), ephemeral=True)
         return None
 
 
-def chunk_lines(lines, limit=1900):
+def sort_field_ids(field_ids):
+    return sorted(
+        field_ids,
+        key=lambda x: int(x) if isinstance(x, str) and x.isdigit() else x,
+    )
+
+
+def chunk_lines(lines: list[str], limit: int = 1900) -> list[str]:
     chunks = []
     current = []
     current_len = 0
@@ -76,6 +91,7 @@ def chunk_lines(lines, limit=1900):
             chunks.append("\n".join(current))
             current = []
             current_len = 0
+
         current.append(line)
         current_len += line_len
 
@@ -85,41 +101,79 @@ def chunk_lines(lines, limit=1900):
     return chunks
 
 
+async def send_chunked_response(interaction: discord.Interaction, lines: list[str]):
+    chunks = chunk_lines(lines)
+    await interaction.response.send_message(chunks[0])
+
+    for chunk in chunks[1:]:
+        await interaction.followup.send(chunk)
+
+
 @tasks.loop(seconds=CHECK_EVERY_SECONDS)
 async def poll_fs25():
     global latest_snapshot, last_error_message
 
     try:
-        snapshot = await asyncio.to_thread(fetch_snapshot, FS25_XML_URL, REQUEST_TIMEOUT)
+        snapshot = await asyncio.to_thread(
+            fetch_snapshot,
+            FS25_XML_URL,
+            REQUEST_TIMEOUT,
+        )
         latest_snapshot = snapshot
         last_error_message = None
         alerts.process(snapshot)
     except Exception as error:
         last_error_message = str(error)
         alerts.mark_offline()
-        print(f"FS25 poll error: {error}")
+        logger.exception("FS25 poll error")
 
 
 @client.event
 async def on_ready():
-    print(f"Logged in as {client.user}")
+    logger.info("Logged in as %s", client.user)
+    logger.info("Connected guilds:")
+
+    for guild in client.guilds:
+        logger.info("- %s (%s)", guild.name, guild.id)
+
+    if not DISCORD_WEBHOOK:
+        logger.warning(
+            "DISCORD_WEBHOOK is not configured; alerts will be printed to stdout instead of sent."
+        )
+
     if not poll_fs25.is_running():
         poll_fs25.start()
 
 
+@client.event
+async def on_app_command_error(
+    interaction: discord.Interaction,
+    error: app_commands.AppCommandError,
+):
+    if isinstance(error, app_commands.CheckFailure):
+        if not interaction.response.is_done():
+            await interaction.response.send_message(
+                "❌ You do not have permission to use this command.",
+                ephemeral=True,
+            )
+        return
+
+    logger.exception("Unhandled slash command error")
+    if not interaction.response.is_done():
+        await interaction.response.send_message(
+            "❌ An unexpected error occurred. The developer has been notified.",
+            ephemeral=True,
+        )
+
+
 @client.tree.command(name="status", description="Show the current FS25 server status")
 async def status(interaction: discord.Interaction):
-    try:
-        snapshot = require_snapshot()
-    except RuntimeError as error:
-        await interaction.response.send_message(str(error), ephemeral=True)
+    snapshot = await get_snapshot_or_reply(interaction)
+    if snapshot is None:
         return
 
     players = ", ".join(sorted(snapshot.players)) or "None"
-    field_ids = sorted(
-        snapshot.owned_fields.keys(),
-        key=lambda x: int(x) if isinstance(x, str) and x.isdigit() else x,
-    )
+    field_ids = sort_field_ids(snapshot.owned_fields.keys())
     owned_fields = ", ".join(field_ids) or "None"
 
     message = (
@@ -136,44 +190,40 @@ async def status(interaction: discord.Interaction):
 
 @client.tree.command(name="players", description="List online FS25 players")
 async def players(interaction: discord.Interaction):
-    try:
-        snapshot = require_snapshot()
-    except RuntimeError as error:
-        await interaction.response.send_message(str(error), ephemeral=True)
+    snapshot = await get_snapshot_or_reply(interaction)
+    if snapshot is None:
         return
+
     if not snapshot.players:
         await interaction.response.send_message("No players online.")
         return
 
-    await interaction.response.send_message("👤 **Online players:**\n" + "\n".join(f"• {p}" for p in sorted(snapshot.players)))
+    lines = ["👤 **Online players:**"]
+    lines.extend(f"• {player}" for player in sorted(snapshot.players))
+
+    await interaction.response.send_message("\n".join(lines))
 
 
 @client.tree.command(name="fields", description="List owned FS25 fields")
 async def fields(interaction: discord.Interaction):
-    try:
-        snapshot = require_snapshot()
-    except RuntimeError as error:
-        await interaction.response.send_message(str(error), ephemeral=True)
+    snapshot = await get_snapshot_or_reply(interaction)
+    if snapshot is None:
         return
 
     if not snapshot.owned_fields:
         await interaction.response.send_message("No owned fields found.")
         return
 
-    field_ids = sorted(
-        snapshot.owned_fields.keys(),
-        key=lambda x: int(x) if isinstance(x, str) and x.isdigit() else x,
-    )
+    lines = [
+        "🌾 **Owned fields:**",
+        "```",
+        f"{'ID':<4} {'Area':>8} {'Value':>10}",
+        f"{'----':<4} {'--------':>8} {'----------':>10}",
+    ]
 
-    lines = ["🌾 **Owned fields:**", "```"]
-    lines.append(f"{'ID':<4} {'Area':>8} {'Value':>10}")
-    lines.append(f"{'----':<4} {'--------':>8} {'----------':>10}")
-
-    for field_id in field_ids:
+    for field_id in sort_field_ids(snapshot.owned_fields.keys()):
         field = snapshot.owned_fields[field_id]
-        area = field.get("area", 0.0)
-        value = field.get("value", 0.0)
-        lines.append(f"{field_id:<4} {area:8.2f} {value:10.0f}")
+        lines.append(f"{field_id:<4} {field.area:8.2f} {field.value:10.0f}")
 
     lines.append("```")
     await interaction.response.send_message("\n".join(lines))
@@ -181,66 +231,71 @@ async def fields(interaction: discord.Interaction):
 
 @client.tree.command(name="stock", description="Show stock/fill levels from the FS25 XML")
 async def stock(interaction: discord.Interaction):
-    try:
-        snapshot = require_snapshot()
-    except RuntimeError as error:
-        await interaction.response.send_message(str(error), ephemeral=True)
+    snapshot = await get_snapshot_or_reply(interaction)
+    if snapshot is None:
         return
-    if not snapshot.stock:
+
+    stock_items = {
+        item: amount
+        for item, amount in snapshot.stock.items()
+        if item != "UNKNOWN"
+    }
+
+    if not stock_items:
         await interaction.response.send_message("No stock levels found.")
         return
 
     lines = ["📦 **Stock levels:**"]
-    for item, amount in sorted(snapshot.stock.items()):
-        if item != "UNKNOWN":
-            lines.append(f"• {item}: {amount:.0f}")
+    lines.extend(
+        f"• {item}: {amount:.0f}"
+        for item, amount in sorted(stock_items.items())
+    )
 
-    await interaction.response.send_message("\n".join(lines[:60]))
+    await send_chunked_response(interaction, lines)
 
 
 @client.tree.command(name="production", description="Show production pallet counts")
 async def production(interaction: discord.Interaction):
-    try:
-        snapshot = require_snapshot()
-    except RuntimeError as error:
-        await interaction.response.send_message(str(error), ephemeral=True)
+    snapshot = await get_snapshot_or_reply(interaction)
+    if snapshot is None:
         return
+
     if not snapshot.production_counts:
         await interaction.response.send_message("No production pallets found.")
         return
 
     lines = ["🏭 **Production pallets:**"]
-    for item, count in sorted(snapshot.production_counts.items()):
-        lines.append(f"• {item}: {count}")
+    lines.extend(
+        f"• {item}: {count}"
+        for item, count in sorted(snapshot.production_counts.items())
+    )
 
-    await interaction.response.send_message("\n".join(lines))
+    await send_chunked_response(interaction, lines)
 
 
 @client.tree.command(name="vehicles", description="List vehicles and equipment")
 async def vehicles(interaction: discord.Interaction):
-    try:
-        snapshot = require_snapshot()
-    except RuntimeError as error:
-        await interaction.response.send_message(str(error), ephemeral=True)
+    snapshot = await get_snapshot_or_reply(interaction)
+    if snapshot is None:
         return
+
+    if not snapshot.vehicles:
+        await interaction.response.send_message("No vehicles or equipment found.")
+        return
+
     lines = ["🚜 **Vehicles and equipment:**"]
+    lines.extend(
+        f"• {vehicle['name']} — {vehicle['category']}"
+        for vehicle in snapshot.vehicles
+    )
 
-    for vehicle in snapshot.vehicles:
-        lines.append(f"• {vehicle['name']} — {vehicle['category']}")
-
-    chunks = chunk_lines(lines)
-    await interaction.response.send_message(chunks[0])
-
-    for chunk in chunks[1:]:
-        await interaction.followup.send(chunk)
+    await send_chunked_response(interaction, lines)
 
 
 @client.tree.command(name="list_mods", description="List active mods on the FS25 server")
 async def list_mods(interaction: discord.Interaction):
-    try:
-        snapshot = require_snapshot()
-    except RuntimeError as error:
-        await interaction.response.send_message(str(error), ephemeral=True)
+    snapshot = await get_snapshot_or_reply(interaction)
+    if snapshot is None:
         return
 
     if not snapshot.mods:
@@ -248,33 +303,47 @@ async def list_mods(interaction: discord.Interaction):
         return
 
     lines = ["🧩 **Active Mods:**"]
-    for mod in snapshot.mods:
-        lines.append(f"• {mod}")
+    lines.extend(f"• {mod}" for mod in snapshot.mods)
 
-    await interaction.response.send_message("\n".join(lines))
+    await send_chunked_response(interaction, lines)
+
 
 @client.tree.command(name="reboot", description="Restart the bot")
+@app_commands.checks.has_permissions(administrator=True)
 async def reboot(interaction: discord.Interaction):
-    member = await get_interaction_member(interaction)
-    if member is None:
+    await interaction.response.send_message("🔄 Rebooting bot...", ephemeral=True)
+    await client.close()
+    os.execv(sys.executable, [sys.executable] + sys.argv)
+
+
+@client.tree.command(name="my_perms", description="Show your Discord permissions")
+async def my_perms(interaction: discord.Interaction):
+    if interaction.guild_id is None:
         await interaction.response.send_message(
             "This command must be used in a server.",
             ephemeral=True,
         )
         return
 
-    print(f"reboot command invoked by user={member} id={member.id} roles={[role.name for role in member.roles]} perms={member.guild_permissions}")
+    perms = interaction.permissions
 
-    if not member.guild_permissions.administrator:
-        await interaction.response.send_message(
-            "You must be a server administrator to reboot the bot.",
-            ephemeral=True,
-        )
-        return
+    lines = [
+        f"👤 **Permissions for {interaction.user.display_name}**",
+        f"Guild ID: {interaction.guild_id}",
+        f"Administrator: {perms.administrator}",
+        f"Manage Roles: {perms.manage_roles}",
+        f"Manage Channels: {perms.manage_channels}",
+        f"Manage Messages: {perms.manage_messages}",
+        f"Kick Members: {perms.kick_members}",
+        f"Ban Members: {perms.ban_members}",
+        f"Manage Guild: {perms.manage_guild}",
+        f"View Audit Log: {perms.view_audit_log}",
+        f"Send Messages: {perms.send_messages}",
+        f"Embed Links: {perms.embed_links}",
+    ]
 
-    await interaction.response.send_message("🔄 Rebooting bot...", ephemeral=True)
-    await client.close()
-    os.execv(sys.executable, [sys.executable] + sys.argv)
+    await interaction.response.send_message("\n".join(lines), ephemeral=True)
+
 
 @client.tree.command(name="last_error", description="Show the last error from polling FS25 XML")
 async def last_error_command(interaction: discord.Interaction):
@@ -282,7 +351,9 @@ async def last_error_command(interaction: discord.Interaction):
         await interaction.response.send_message("✅ No errors yet. All good!")
         return
 
-    await interaction.response.send_message(f"❌ **Last error:**\n```\n{last_error_message}\n```")
+    await interaction.response.send_message(
+        f"❌ **Last error:**\n```\n{last_error_message}\n```"
+    )
 
 
 if not DISCORD_BOT_TOKEN:

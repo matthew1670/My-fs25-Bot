@@ -2,7 +2,14 @@ import requests
 import xml.etree.ElementTree as ET
 from collections import defaultdict
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Set, Union
+from typing import Dict, Iterable, List, Optional, Set, Tuple, Union
+
+
+@dataclass
+class FieldInfo:
+    id: str
+    area: float
+    value: float
 
 
 @dataclass
@@ -15,7 +22,7 @@ class ServerSnapshot:
     slots_used: int
     players: Set[str]
     mods: List[str]
-    owned_fields: Dict[str, Dict[str, Union[str, float]]]
+    owned_fields: Dict[str, FieldInfo]
     stock: Dict[str, float]
     production_counts: Dict[str, int]
     vehicles: List[dict]
@@ -57,18 +64,18 @@ def get_players(root: ET.Element) -> Set[str]:
     return players
 
 
-def get_owned_fields(root: ET.Element) -> Dict[str, Dict[str, Union[str, float]]]:
-    fields = {}
+def get_owned_fields(root: ET.Element) -> Dict[str, FieldInfo]:
+    fields: Dict[str, FieldInfo] = {}
 
     for field in root.findall(".//Farmlands/Farmland"):
         field_id = field.get("id")
         owner = field.get("owner")
         if owner and owner != "0" and field_id:
-            fields[field_id] = {
-                "id": field_id,
-                "area": _float(field.get("area")),
-                "value": _float(field.get("price") or field.get("value")),
-            }
+            fields[field_id] = FieldInfo(
+                id=field_id,
+                area=_float(field.get("area")),
+                value=_float(field.get("price") or field.get("value")),
+            )
 
     return fields
 

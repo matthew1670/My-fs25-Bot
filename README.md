@@ -20,7 +20,6 @@ Slash commands:
 - `/stock`
 - `/production`
 - `/vehicles`
-- `/search_vehicle`
 - `/last_error`
 
 ## Setup
