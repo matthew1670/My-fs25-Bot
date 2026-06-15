@@ -1,5 +1,6 @@
 import asyncio
 import os
+import sys
 from typing import Optional
 
 import discord
@@ -46,6 +47,22 @@ def require_snapshot() -> ServerSnapshot:
     if latest_snapshot is None:
         raise RuntimeError("No FS25 data loaded yet. Try again in a few seconds.")
     return latest_snapshot
+
+
+async def get_interaction_member(interaction: discord.Interaction) -> Optional[discord.Member]:
+    if interaction.guild is None:
+        return None
+    if isinstance(interaction.user, discord.Member):
+        return interaction.user
+
+    member = interaction.guild.get_member(interaction.user.id)
+    if member is not None:
+        return member
+
+    try:
+        return await interaction.guild.fetch_member(interaction.user.id)
+    except (discord.NotFound, discord.HTTPException):
+        return None
 
 
 def chunk_lines(lines, limit=1900):
@@ -99,7 +116,11 @@ async def status(interaction: discord.Interaction):
         return
 
     players = ", ".join(sorted(snapshot.players)) or "None"
-    owned_fields = ", ".join(sorted(snapshot.owned_fields, key=int)) or "None"
+    field_ids = sorted(
+        snapshot.owned_fields.keys(),
+        key=lambda x: int(x) if isinstance(x, str) and x.isdigit() else x,
+    )
+    owned_fields = ", ".join(field_ids) or "None"
 
     message = (
         f"🚜 **{snapshot.server_name}**\n"
@@ -134,9 +155,28 @@ async def fields(interaction: discord.Interaction):
     except RuntimeError as error:
         await interaction.response.send_message(str(error), ephemeral=True)
         return
-    fields_list = sorted(snapshot.owned_fields, key=int)
-    message = "🌾 **Owned fields:**\n" + ("\n".join(f"• Field {f}" for f in fields_list) or "None")
-    await interaction.response.send_message(message)
+
+    if not snapshot.owned_fields:
+        await interaction.response.send_message("No owned fields found.")
+        return
+
+    field_ids = sorted(
+        snapshot.owned_fields.keys(),
+        key=lambda x: int(x) if isinstance(x, str) and x.isdigit() else x,
+    )
+
+    lines = ["🌾 **Owned fields:**", "```"]
+    lines.append(f"{'ID':<4} {'Area':>8} {'Value':>10}")
+    lines.append(f"{'----':<4} {'--------':>8} {'----------':>10}")
+
+    for field_id in field_ids:
+        field = snapshot.owned_fields[field_id]
+        area = field.get("area", 0.0)
+        value = field.get("value", 0.0)
+        lines.append(f"{field_id:<4} {area:8.2f} {value:10.0f}")
+
+    lines.append("```")
+    await interaction.response.send_message("\n".join(lines))
 
 
 @client.tree.command(name="stock", description="Show stock/fill levels from the FS25 XML")
@@ -213,33 +253,28 @@ async def list_mods(interaction: discord.Interaction):
 
     await interaction.response.send_message("\n".join(lines))
 
-
-@client.tree.command(name="search_vehicle", description="Search vehicles by name")
-@app_commands.describe(query="Vehicle name or part of a name, e.g. MF")
-async def search_vehicle(interaction: discord.Interaction, query: str):
-    try:
-        snapshot = require_snapshot()
-    except RuntimeError as error:
-        await interaction.response.send_message(str(error), ephemeral=True)
-        return
-    query_lower = query.lower()
-    matches = [v for v in snapshot.vehicles if query_lower in v["name"].lower()]
-
-    if not matches:
-        await interaction.response.send_message(f"No vehicles found matching `{query}`.")
-        return
-
-    lines = [f"🔎 **Vehicle search: {query}**"]
-    for vehicle in matches[:20]:
-        lines.append(
-            f"• **{vehicle['name']}** — {vehicle['category']} "
-            f"at x={vehicle['x']:.0f}, z={vehicle['z']:.0f}"
+@client.tree.command(name="reboot", description="Restart the bot")
+async def reboot(interaction: discord.Interaction):
+    member = await get_interaction_member(interaction)
+    if member is None:
+        await interaction.response.send_message(
+            "This command must be used in a server.",
+            ephemeral=True,
         )
-        if vehicle["fillTypes"]:
-            lines.append(f"  Fill: {vehicle['fillTypes']} / {vehicle['fillLevels']}")
+        return
 
-    await interaction.response.send_message("\n".join(lines))
+    print(f"reboot command invoked by user={member} id={member.id} roles={[role.name for role in member.roles]} perms={member.guild_permissions}")
 
+    if not member.guild_permissions.administrator:
+        await interaction.response.send_message(
+            "You must be a server administrator to reboot the bot.",
+            ephemeral=True,
+        )
+        return
+
+    await interaction.response.send_message("🔄 Rebooting bot...", ephemeral=True)
+    await client.close()
+    os.execv(sys.executable, [sys.executable] + sys.argv)
 
 @client.tree.command(name="last_error", description="Show the last error from polling FS25 XML")
 async def last_error_command(interaction: discord.Interaction):

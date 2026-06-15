@@ -62,11 +62,12 @@ def get_owned_fields(root: ET.Element) -> Dict[str, Dict[str, Union[str, float]]
 
     for field in root.findall(".//Farmlands/Farmland"):
         field_id = field.get("id")
-        if field.get("owner") == "1" and field_id:
+        owner = field.get("owner")
+        if owner and owner != "0" and field_id:
             fields[field_id] = {
                 "id": field_id,
                 "area": _float(field.get("area")),
-                "value": _float(field.get("value")),
+                "value": _float(field.get("price") or field.get("value")),
             }
 
     return fields

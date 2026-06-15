@@ -2,22 +2,10 @@ import requests
 from typing import Optional, Set
 
 from fs25_parser import ServerSnapshot
-
-
-LOW_STOCK_LIMITS = {
-    "SEEDS": 100,
-    "HERBICIDE": 250,
-    "LIQUIDFERTILIZER": 500,
-    "BALE_WRAP": 10,
-    "BALE_NET": 5,
-}
-
-
 class AlertManager:
     def __init__(self, webhook_url: str):
         self.webhook_url = webhook_url
         self.last_snapshot: Optional[ServerSnapshot] = None
-        self.low_stock_already_alerted: Set[str] = set()
         self.server_online = False
 
     def send(self, message: str):
@@ -28,7 +16,11 @@ class AlertManager:
         requests.post(self.webhook_url, json={"content": message}, timeout=10)
 
     def build_startup_summary(self, snapshot: ServerSnapshot) -> str:
-        owned_fields = ", ".join(sorted(snapshot.owned_fields, key=int)) or "None"
+        owned_field_ids = sorted(
+        snapshot.owned_fields.keys(),
+        key=lambda x: int(x) if isinstance(x, str) and x.isdigit() else x,
+        )
+        owned_fields = ", ".join(owned_field_ids) or "None"
 
         lines = [
             f"🚜 **{snapshot.server_name} alerts started**",
@@ -80,18 +72,6 @@ class AlertManager:
 
         for field_id in sorted(sold_fields, key=int):
             self.send(f"💸 **Field {field_id} has been sold**")
-
-        for item, limit in LOW_STOCK_LIMITS.items():
-            amount = snapshot.stock.get(item, 0)
-            old_amount = self.last_snapshot.stock.get(item, 0)
-
-            if amount < limit and item not in self.low_stock_already_alerted:
-                self.send(f"⚠️ **Low stock: {item} is at {amount:.0f}**")
-                self.low_stock_already_alerted.add(item)
-
-            if amount >= limit and item in self.low_stock_already_alerted:
-                self.send(f"✅ **Stock recovered: {item} is now at {amount:.0f}**")
-                self.low_stock_already_alerted.discard(item)
 
         for item, count in snapshot.production_counts.items():
             old_count = self.last_snapshot.production_counts.get(item, 0)
