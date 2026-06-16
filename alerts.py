@@ -19,6 +19,7 @@ class AlertManager:
         self.webhook_url = webhook_url
         self.last_snapshot: Optional[ServerSnapshot] = None
         self.server_online = False
+        self.server_was_closed = False
 
     def send(self, message: str):
         """Send a message to Discord or log it when webhook is missing."""
@@ -62,9 +63,30 @@ class AlertManager:
         if self.server_online:
             self.send("❌ **FS25 server appears to be offline or unreachable**")
             self.server_online = False
+        self.server_was_closed = True
+        self.last_snapshot = None
+
+    def is_closed_snapshot(self, snapshot: ServerSnapshot) -> bool:
+        return (
+            not snapshot.players
+            and not snapshot.owned_fields
+            and not snapshot.mods
+        )
 
     def process(self, snapshot: ServerSnapshot):
         """Process a new server snapshot and send alerts for detected changes."""
+        if self.is_closed_snapshot(snapshot):
+            self.server_was_closed = True
+            if self.server_online:
+                self.mark_offline()
+            return
+
+        if getattr(self, "server_was_closed", False):
+            self.server_was_closed = False
+            self.last_snapshot = snapshot
+            self.mark_online(snapshot)
+            return
+
         self.mark_online(snapshot)
 
         if self.last_snapshot is None:
