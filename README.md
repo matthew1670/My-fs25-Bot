@@ -24,10 +24,18 @@ Slash commands:
 
 ## Setup
 
-Install packages:
+This project targets Python 3.12+.
+
+Install runtime packages:
 
 ```bash
 pip install -r requirements.txt
+```
+
+Install development/test packages:
+
+```bash
+pip install -r requirements-dev.txt
 ```
 
 Create your environment file:
@@ -45,10 +53,32 @@ DISCORD_WEBHOOK=...
 FS25_XML_URL=...
 ```
 
+`FS25_XML_URL` is required for polling to start; the bot will log an error and stay idle if it is missing.
+
 Run the bot:
 
 ```bash
 python bot.py
+```
+
+## Testing
+
+Before running tests, activate the project virtual environment:
+
+```powershell
+.\.venv\Scripts\Activate.ps1
+```
+
+Then run:
+
+```powershell
+pytest -q
+```
+
+If you prefer not to activate the venv, use the venv Python directly:
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest -q
 ```
 
 ## Discord Developer Portal

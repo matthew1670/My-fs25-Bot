@@ -7,6 +7,11 @@ from fs25_parser import ServerSnapshot
 logger = logging.getLogger(__name__)
 
 
+def _field_key(x: str):
+    if isinstance(x, str) and x.isdigit():
+        return (0, int(x))
+    return (1, str(x))
+
 class AlertManager:
     """Manage FS25 alerts and send notifications via Discord webhook."""
 
@@ -27,19 +32,36 @@ class AlertManager:
             logger.info("DISCORD ALERT: %s", message)
             return
 
-        try:
-            response = requests.post(self.webhook_url, json={"content": message}, timeout=10)
-            response.raise_for_status()
-        except Exception:
-            logger.exception("Failed to send alert via webhook")
-            logger.info("DISCORD ALERT: %s", message)
+        max_attempts = 3
+        for attempt in range(1, max_attempts + 1):
+            try:
+                response = requests.post(self.webhook_url, json={"content": message}, timeout=10)
+                response.raise_for_status()
+                return
+            except requests.RequestException as exc:
+                logger.warning(
+                    "Attempt %d/%d: webhook send failed (%s)",
+                    attempt,
+                    max_attempts,
+                    exc,
+                )
+                if attempt == max_attempts:
+                    logger.exception("Failed to send alert via webhook after %d attempts", max_attempts)
+                    logger.info("DISCORD ALERT: %s", message)
+                else:
+                    # small backoff between attempts
+                    import time
+
+                    time.sleep(0.5)
 
     def build_startup_summary(self, snapshot: ServerSnapshot) -> str:
         """Build a summary message for when the server first comes online."""
-        owned_field_ids = sorted(
-            snapshot.owned_fields.keys(),
-            key=lambda x: int(x) if isinstance(x, str) and x.isdigit() else x,
-        )
+        def _field_key(x: str):
+            if isinstance(x, str) and x.isdigit():
+                return (0, int(x))
+            return (1, str(x))
+
+        owned_field_ids = sorted(snapshot.owned_fields.keys(), key=_field_key)
         owned_fields = ", ".join(owned_field_ids) or "None"
 
         lines = [
@@ -108,7 +130,7 @@ class AlertManager:
         sold_fields = previous_field_ids - current_field_ids
 
         # alert for fields being bought
-        for field_id in sorted(bought_fields, key=int):
+        for field_id in sorted(bought_fields, key=_field_key):
             field = snapshot.owned_fields[field_id]
             self.send(
                 f"🌾 **Field {field_id} has been bought** "
@@ -116,7 +138,7 @@ class AlertManager:
             )
 
         # alert for fields being sold
-        for field_id in sorted(sold_fields, key=int):
+        for field_id in sorted(sold_fields, key=_field_key):
             self.send(f"💸 **Field {field_id} has been sold**")
         
         """alert for new production pallets being detected"""
