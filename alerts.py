@@ -140,8 +140,8 @@ class AlertManager:
         # alert for fields being sold
         for field_id in sorted(sold_fields, key=_field_key):
             self.send(f"💸 **Field {field_id} has been sold**")
-        
-        """alert for new production pallets being detected"""
+
+        # alert for new production pallets being detected
         for item, count in snapshot.production_counts.items():
             old_count = self.last_snapshot.production_counts.get(item, 0)
             if count > old_count:

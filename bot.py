@@ -430,11 +430,11 @@ async def last_error_command(interaction: discord.Interaction):
     )
 
 
-if not DISCORD_BOT_TOKEN:
-    raise SystemExit("Missing DISCORD_BOT_TOKEN in .env")
-
-if not FS25_XML_URL:
-    raise SystemExit("Missing FS25_XML_URL in .env")
-
 if __name__ == "__main__":
+    if not DISCORD_BOT_TOKEN:
+        raise SystemExit("Missing DISCORD_BOT_TOKEN in .env")
+
+    if not FS25_XML_URL:
+        raise SystemExit("Missing FS25_XML_URL in .env")
+
     client.run(DISCORD_BOT_TOKEN)
