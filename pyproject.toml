@@ -1,0 +1,14 @@
+[project]
+name = "fs25-alerts"
+version = "0.1.0"
+description = "Discord bot for Farming Simulator 25 dedicated server XML alerts."
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "requests",
+    "python-dotenv",
+    "discord.py"
+]
+
+[project.optional-dependencies]
+test = ["pytest"]

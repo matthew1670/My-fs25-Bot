@@ -5,6 +5,8 @@ import sys
 from typing import Optional
 
 import discord
+import requests
+import xml.etree.ElementTree as ET
 from discord import app_commands
 from discord.ext import tasks
 from dotenv import load_dotenv
@@ -23,9 +25,20 @@ load_dotenv()
 DISCORD_BOT_TOKEN = os.getenv("DISCORD_BOT_TOKEN", "")
 DISCORD_WEBHOOK = os.getenv("DISCORD_WEBHOOK", "")
 FS25_XML_URL = os.getenv("FS25_XML_URL", "")
-GUILD_ID = os.getenv("DISCORD_GUILD_ID")
+GUILD_ID_RAW = os.getenv("DISCORD_GUILD_ID")
+try:
+    GUILD_ID = int(GUILD_ID_RAW) if GUILD_ID_RAW else None
+except ValueError:
+    logger.warning("DISCORD_GUILD_ID is set but not a valid integer: %r", GUILD_ID_RAW)
+    GUILD_ID = None
+    
+MEMBER_CACHE_ALL = os.getenv("MEMBER_CACHE_ALL", "false").lower() in ("1", "true", "yes")
 CHECK_EVERY_SECONDS = int(os.getenv("CHECK_EVERY_SECONDS", "10"))
 REQUEST_TIMEOUT = int(os.getenv("REQUEST_TIMEOUT", "5"))
+RETRY_COUNT = int(os.getenv("RETRY_COUNT", "5"))
+RETRY_DELAY = float(os.getenv("RETRY_DELAY", "1"))
+RETRY_BACKOFF_FACTOR = float(os.getenv("RETRY_BACKOFF_FACTOR", "2.0"))
+RETRY_MAX_DELAY = float(os.getenv("RETRY_MAX_DELAY", "30"))
 
 latest_snapshot: Optional[ServerSnapshot] = None
 last_error_message: Optional[str] = None
@@ -38,10 +51,11 @@ class FS25Bot(discord.Client):
         intents.guilds = True
         intents.members = True
 
-        super().__init__(
-            intents=intents,
-            member_cache_flags=discord.MemberCacheFlags.all(),
-        )
+        init_kwargs = {"intents": intents}
+        if MEMBER_CACHE_ALL:
+            init_kwargs["member_cache_flags"] = discord.MemberCacheFlags.all()
+
+        super().__init__(**init_kwargs)
 
         self.tree = app_commands.CommandTree(self)
 
@@ -74,10 +88,12 @@ async def get_snapshot_or_reply(
 
 
 def sort_field_ids(field_ids):
-    return sorted(
-        field_ids,
-        key=lambda x: int(x) if isinstance(x, str) and x.isdigit() else x,
-    )
+    def _key(x):
+        if isinstance(x, str) and x.isdigit():
+            return (0, int(x))
+        return (1, str(x))
+
+    return sorted(field_ids, key=_key)
 
 
 def chunk_lines(lines: list[str], limit: int = 1900) -> list[str]:
@@ -109,23 +125,59 @@ async def send_chunked_response(interaction: discord.Interaction, lines: list[st
         await interaction.followup.send(chunk)
 
 
-@tasks.loop(seconds=CHECK_EVERY_SECONDS)
-async def poll_fs25():
+async def poll_fs25_once():
     global latest_snapshot, last_error_message
 
-    try:
-        snapshot = await asyncio.to_thread(
-            fetch_snapshot,
-            FS25_XML_URL,
-            REQUEST_TIMEOUT,
-        )
-        latest_snapshot = snapshot
-        last_error_message = None
-        alerts.process(snapshot)
-    except Exception as error:
-        last_error_message = str(error)
+    last_exc: Exception | None = None
+    snapshot = None
+
+    for attempt in range(1, RETRY_COUNT + 1):
+        try:
+            snapshot = await asyncio.to_thread(
+                fetch_snapshot,
+                FS25_XML_URL,
+                REQUEST_TIMEOUT,
+            )
+            last_error_message = None
+            latest_snapshot = snapshot
+            alerts.process(snapshot)
+            return
+        except (requests.RequestException, ET.ParseError) as error:
+            # Expected transient network or parse errors: retry
+            last_exc = error
+            last_error_message = str(error)
+            logger.warning(
+                "Attempt %d/%d: failed to fetch FS25 XML (%s): %s",
+                attempt,
+                RETRY_COUNT,
+                type(error).__name__,
+                error,
+            )
+            if attempt < RETRY_COUNT:
+                backoff = min(
+                    RETRY_MAX_DELAY,
+                    RETRY_DELAY * (RETRY_BACKOFF_FACTOR ** (attempt - 1)),
+                )
+                await asyncio.sleep(backoff)
+        except Exception:
+            # Unexpected error — log full traceback and re-raise so it isn't silently masked
+            logger.exception("Unexpected error while polling FS25 XML")
+            raise
+
+    # All attempts failed
+    if last_exc is not None:
         alerts.mark_offline()
-        logger.exception("FS25 poll error")
+        # Log error including the original traceback captured from the last exception
+        logger.error(
+            "FS25 poll error after %d attempts",
+            RETRY_COUNT,
+            exc_info=(type(last_exc), last_exc, last_exc.__traceback__),
+        )
+
+
+@tasks.loop(seconds=CHECK_EVERY_SECONDS)
+async def poll_fs25():
+    await poll_fs25_once()
 
 
 @client.event
@@ -140,6 +192,12 @@ async def on_ready():
         logger.warning(
             "DISCORD_WEBHOOK is not configured; alerts will be printed to stdout instead of sent."
         )
+
+    if not FS25_XML_URL:
+        logger.error(
+            "FS25_XML_URL is not configured; polling will not start."
+        )
+        return
 
     if not poll_fs25.is_running():
         poll_fs25.start()
@@ -376,4 +434,5 @@ if not DISCORD_BOT_TOKEN:
 if not FS25_XML_URL:
     raise SystemExit("Missing FS25_XML_URL in .env")
 
-client.run(DISCORD_BOT_TOKEN)
+if __name__ == "__main__":
+    client.run(DISCORD_BOT_TOKEN)

@@ -2,7 +2,7 @@ import requests
 import xml.etree.ElementTree as ET
 from collections import defaultdict
 from dataclasses import dataclass
-from typing import Dict, Iterable, List, Optional, Set, Tuple, Union
+from typing import Dict, List, Optional, Set
 
 
 @dataclass
@@ -42,9 +42,23 @@ PRODUCTION_TYPES = {
 
 
 def fetch_xml(xml_url: str, timeout: int = 5) -> ET.Element:
-    response = requests.get(xml_url, timeout=timeout)
-    response.raise_for_status()
-    return ET.fromstring(response.text)
+    if not xml_url:
+        raise ValueError("FS25 XML URL must be provided")
+
+    try:
+        response = requests.get(xml_url, timeout=timeout)
+        response.raise_for_status()
+    except requests.RequestException as exc:
+        raise requests.RequestException(
+            f"Failed to fetch FS25 XML from {xml_url}: {exc}"
+        ) from exc
+
+    try:
+        return ET.fromstring(response.text)
+    except ET.ParseError as exc:
+        raise ET.ParseError(
+            f"Failed to parse FS25 XML: {exc}"
+        ) from exc
 
 
 def _float(value: Optional[str], default: float = 0.0) -> float:
