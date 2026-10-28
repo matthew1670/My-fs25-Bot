@@ -10,6 +10,7 @@ import xml.etree.ElementTree as ET
 from discord import app_commands
 from discord.ext import tasks
 from dotenv import load_dotenv
+from tenacity import retry, stop_after_attempt, wait_exponential
 
 from alerts import AlertManager
 from fs25_parser import ServerSnapshot, fetch_snapshot
@@ -127,7 +128,13 @@ async def send_chunked_response(interaction: discord.Interaction, lines: list[st
         await interaction.followup.send(chunk)
 
 
+@retry(
+    stop=stop_after_attempt(RETRY_COUNT),
+    wait=wait_exponential(multiplier=RETRY_BACKOFF_FACTOR, min=RETRY_DELAY, max=RETRY_MAX_DELAY),
+    reraise=True,
+)
 async def poll_fs25_once():
+    """Fetch and process FS25 XML with automatic retry on transient failures."""
     global latest_snapshot, last_error_message
 
     last_exc: Exception | None = None
@@ -142,7 +149,7 @@ async def poll_fs25_once():
             )
             last_error_message = None
             latest_snapshot = snapshot
-            alerts.process(snapshot)
+            await asyncio.to_thread(alerts.process, snapshot)
             return
         except (requests.RequestException, ET.ParseError) as error:
             # Expected transient network or parse errors: retry
@@ -168,7 +175,7 @@ async def poll_fs25_once():
 
     # All attempts failed
     if last_exc is not None:
-        alerts.mark_offline()
+        await asyncio.to_thread(alerts.mark_offline)
         # Log error including the original traceback captured from the last exception
         logger.error(
             "FS25 poll error after %d attempts",
@@ -180,6 +187,21 @@ async def poll_fs25_once():
 @tasks.loop(seconds=CHECK_EVERY_SECONDS)
 async def poll_fs25():
     await poll_fs25_once()
+    # If tenacity exhausts retries, it raises; we catch at the task level below.
+
+
+@poll_fs25.before_loop
+async def on_poll_start():
+    # Ensure the loop is ready before first run
+    await asyncio.sleep(0)
+
+
+@client.event
+async def on_task_error(task: tasks.TaskEvent):
+    """Handle polling errors after tenacity exhausts retries."""
+    if task.loop_func.__name__ == "poll_fs25_once":
+        logger.exception("Polling failed after all retries")
+        await asyncio.to_thread(alerts.mark_offline)
 
 
 @client.event
@@ -201,8 +223,7 @@ async def on_ready():
         )
         return
 
-    if not poll_fs25.is_running():
-        poll_fs25.start()
+    poll_fs25.start()
 
 
 @client.event
